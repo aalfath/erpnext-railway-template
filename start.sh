@@ -56,11 +56,42 @@ bench set-config -gp socketio_port 9000 >/dev/null
 bench set-config -g webserver_host 127.0.0.1 >/dev/null
 bench set-config -gp webserver_port 8000 >/dev/null
 
+# While the site is being created or migrated (minutes), serve a holding page on PORT so Railway's
+# health check (300 s by default) passes and visitors see what's happening.
+SETUP_PID=""
+setup_page_start() {
+  [ -n "$SETUP_PID" ] && return 0
+  cat > /tmp/nginx-setup.conf <<NGINX
+worker_processes 1;
+pid /tmp/nginx-setup.pid;
+error_log stderr;
+events { worker_connections 64; }
+http {
+  access_log off;
+  server {
+    listen $PORT;
+    location = /api/method/ping { default_type application/json; return 200 '{"message":"pong"}'; }
+    location / {
+      default_type text/html;
+      add_header Retry-After 30 always;
+      return 503 '<!doctype html><meta http-equiv="refresh" content="20"><title>ERPNext is starting</title><p style="font-family:sans-serif;margin:3em">ERPNext is being set up (first start or upgrade). This takes a few minutes; the page reloads by itself.</p>';
+    }
+  }
+}
+NGINX
+  nginx -c /tmp/nginx-setup.conf -g 'daemon off;' & SETUP_PID=$!
+}
+setup_page_stop() {
+  [ -z "$SETUP_PID" ] && return 0
+  kill -TERM "$SETUP_PID" 2>/dev/null; wait "$SETUP_PID" 2>/dev/null; SETUP_PID=""
+}
+
 # 3. Create the site on first start; migrate when the image version changes.
 VERSION="$(ls -1 apps | while read -r a; do printf '%s=%s ' "$a" "$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "apps/$a/$a/__init__.py")"; done)"
 if [ ! -f "sites/$SITE/.railway-installed" ]; then
   : "${ADMIN_PASSWORD:?ADMIN_PASSWORD is required for the first start}"
   log "Creating site $SITE (first start, takes a few minutes)"
+  setup_page_start
   bench new-site "$SITE" --force \
     --mariadb-user-host-login-scope='%' \
     --db-root-username root --db-root-password "$DB_ROOT_PASSWORD" \
@@ -74,6 +105,7 @@ if [ ! -f "sites/$SITE/.railway-installed" ]; then
   touch "sites/$SITE/.railway-installed"
 elif [ "$(cat "sites/$SITE/.railway-version" 2>/dev/null)" != "$VERSION" ]; then
   log "App versions changed ($VERSION), running bench migrate"
+  setup_page_start
   bench --site "$SITE" migrate
   echo "$VERSION" > "sites/$SITE/.railway-version"
 fi
@@ -93,6 +125,8 @@ envsubst '${BACKEND} ${SOCKETIO} ${NGINX_LISTEN_PORT} ${UPSTREAM_REAL_IP_ADDRESS
   | sed 's#proxy_set_header Origin .*#proxy_set_header Origin $proxy_x_forwarded_proto://$host;#' \
   > /etc/nginx/conf.d/frappe.conf
 sed -e "s/^worker_processes .*/worker_processes ${NGINX_WORKERS:-2};/" -e '/^worker_cpu_affinity/d' /etc/nginx/nginx.conf > /tmp/nginx.conf
+
+setup_page_stop
 
 # 5. Run every process; if one exits, stop the rest so Railway restarts the container.
 pids=()

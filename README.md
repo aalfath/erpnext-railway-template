@@ -8,6 +8,7 @@ separate containers on one shared `sites` volume. This template runs them all in
   so the service needs no network fetch at boot) and runs it. The script:
   - runs as root only long enough to make the Railway volume at `/home/frappe/frappe-bench/sites` writable, then drops to the `frappe` user
   - writes the bench config (MariaDB, Redis, socketio), creates the site `erp.local` with ERPNext on first start, and runs `bench migrate` when the image version changes
+  - serves a small "being set up" page on `PORT` while the site is created or migrated (so Railway's health check passes), then
   - starts nginx (on `PORT`), gunicorn, the socketio server, one worker for every queue and the scheduler. If any of them exits, the container exits and Railway restarts it
 - **MariaDB**: the official `mariadb:11.8` image with the charset flags Frappe needs, plus a volume.
 - **Redis**: the official `redis:7.4-alpine` image with a password and AOF persistence, used for cache, queue and socketio.
